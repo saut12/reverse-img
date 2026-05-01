@@ -64,12 +64,10 @@ app.use("/img", async (req, res) => {
       } catch {}
     });
 
-    await streamPipeline(
-      Readable.fromWeb(upstream.body),
-      res
-    );
+await streamPipeline(upstream.body, res);
 
-    // ❌ JANGAN ADA res.send / res.json di sini
+
+// ❌ JANGAN ADA res.send / res.json di sini
   } catch (err) {
     console.error("ERROR:", err);
 
