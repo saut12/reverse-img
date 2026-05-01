@@ -6,8 +6,8 @@ const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 
-const streamPipeline = promisify(pipeline);
 const app = express();
+const streamPipeline = promisify(pipeline);
 
 // =========================
 // CONFIG
@@ -19,7 +19,7 @@ const ALLOWED_HOSTS = [
 ];
 
 const CACHE_DIR = path.join(__dirname, "cache");
-const CACHE_TTL = 5 * 60 * 1000; // 🔥 5 menit
+const CACHE_TTL = 5 * 60 * 1000; // 5 menit
 
 if (!fs.existsSync(CACHE_DIR)) {
   fs.mkdirSync(CACHE_DIR);
@@ -36,7 +36,6 @@ function getFilePath(key) {
   return path.join(CACHE_DIR, key);
 }
 
-// cek expired pakai mtime
 function isExpired(filePath) {
   try {
     const stat = fs.statSync(filePath);
@@ -47,21 +46,22 @@ function isExpired(filePath) {
 }
 
 // =========================
-// ROUTE
+// CORE HANDLER
 // =========================
-app.use("/img", async (req, res) => {
+async function handleRequest(imageUrl, req, res) {
   try {
-    const raw = req.originalUrl.replace("/img/", "");
+    if (!imageUrl) {
+      return res.status(400).send("Missing ?url=");
+    }
 
-    if (!raw) return res.status(400).send("Missing URL");
+    let urlObj;
+    try {
+      urlObj = new URL(imageUrl);
+    } catch {
+      return res.status(400).send("Invalid URL");
+    }
 
-    const decoded = decodeURIComponent(raw);
-    const imageUrl = decoded.startsWith("http")
-      ? decoded
-      : "https://" + decoded;
-
-    const urlObj = new URL(imageUrl);
-
+    // whitelist host
     if (!ALLOWED_HOSTS.includes(urlObj.hostname)) {
       return res.status(403).send("Forbidden host");
     }
@@ -70,25 +70,27 @@ app.use("/img", async (req, res) => {
     const filePath = getFilePath(key);
 
     // =========================
-    // CACHE HIT (valid + not expired)
+    // CACHE HIT
     // =========================
     if (fs.existsSync(filePath) && !isExpired(filePath)) {
-      res.setHeader("X-Cache", "HIT-VPS");
-      res.setHeader("Cache-Control", "public, max-age=300"); // 5 menit
+      res.setHeader("X-Cache", "HIT");
+      res.setHeader("Cache-Control", "public, max-age=300, immutable");
+      res.setHeader("X-Cache-Key", key);
 
       return fs.createReadStream(filePath).pipe(res);
     }
 
-    // kalau expired → hapus
-    if (fs.existsSync(filePath) && isExpired(filePath)) {
+    // expired cleanup
+    if (fs.existsSync(filePath)) {
       fs.unlinkSync(filePath);
     }
 
     // =========================
-    // MISS → FETCH ORIGIN
+    // FETCH ORIGIN
     // =========================
-    res.setHeader("X-Cache", "MISS-VPS");
-    res.setHeader("Cache-Control", "public, max-age=300");
+    res.setHeader("X-Cache", "MISS");
+    res.setHeader("Cache-Control", "public, max-age=300, immutable");
+    res.setHeader("X-Cache-Key", key);
 
     const upstream = await fetch(imageUrl, {
       headers: {
@@ -105,12 +107,10 @@ app.use("/img", async (req, res) => {
 
     const nodeStream = Readable.fromWeb(upstream.body);
 
-    // =========================
-    // STREAM + SAVE TO DISK
-    // =========================
     const fileStream = fs.createWriteStream(filePath);
     const passThrough = new PassThrough();
 
+    // stream ke client + save ke disk sekaligus
     nodeStream.pipe(passThrough);
     nodeStream.pipe(fileStream);
 
@@ -122,9 +122,18 @@ app.use("/img", async (req, res) => {
       res.status(500).send("Server error");
     }
   }
+}
+
+// =========================
+// ROUTE CDN
+// =========================
+app.get("/img", async (req, res) => {
+  return handleRequest(req.query.url, req, res);
 });
 
 // =========================
+// START SERVER
+// =========================
 app.listen(3000, () => {
-  console.log("Mini CDN (5 min cache) running on http://localhost:3000");
+  console.log("🚀 Mini CDN running:");
 });
