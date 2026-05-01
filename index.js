@@ -1,26 +1,59 @@
 const express = require("express");
 const { pipeline } = require("stream");
-const { Readable } = require("stream");
+const { Readable, PassThrough } = require("stream");
 const { promisify } = require("util");
+const crypto = require("crypto");
+const fs = require("fs");
+const path = require("path");
 
 const streamPipeline = promisify(pipeline);
 const app = express();
 
+// =========================
+// CONFIG
+// =========================
 const ALLOWED_HOSTS = [
   "sv1.imgkc1.my.id",
   "sv2.imgkc2.my.id",
   "sv3.imgkc3.my.id"
 ];
 
-app.use("/img", async (req, res) => {
-  let upstream;
+const CACHE_DIR = path.join(__dirname, "cache");
+const CACHE_TTL = 5 * 60 * 1000; // 🔥 5 menit
 
+if (!fs.existsSync(CACHE_DIR)) {
+  fs.mkdirSync(CACHE_DIR);
+}
+
+// =========================
+// UTIL
+// =========================
+function makeKey(url) {
+  return crypto.createHash("md5").update(url).digest("hex");
+}
+
+function getFilePath(key) {
+  return path.join(CACHE_DIR, key);
+}
+
+// cek expired pakai mtime
+function isExpired(filePath) {
+  try {
+    const stat = fs.statSync(filePath);
+    return Date.now() - stat.mtimeMs > CACHE_TTL;
+  } catch {
+    return true;
+  }
+}
+
+// =========================
+// ROUTE
+// =========================
+app.use("/img", async (req, res) => {
   try {
     const raw = req.originalUrl.replace("/img/", "");
 
-    if (!raw) {
-      return res.status(400).send("Missing URL");
-    }
+    if (!raw) return res.status(400).send("Missing URL");
 
     const decoded = decodeURIComponent(raw);
     const imageUrl = decoded.startsWith("http")
@@ -33,11 +66,31 @@ app.use("/img", async (req, res) => {
       return res.status(403).send("Forbidden host");
     }
 
-    if (!["http:", "https:"].includes(urlObj.protocol)) {
-      return res.status(400).send("Invalid protocol");
+    const key = makeKey(imageUrl);
+    const filePath = getFilePath(key);
+
+    // =========================
+    // CACHE HIT (valid + not expired)
+    // =========================
+    if (fs.existsSync(filePath) && !isExpired(filePath)) {
+      res.setHeader("X-Cache", "HIT-VPS");
+      res.setHeader("Cache-Control", "public, max-age=300"); // 5 menit
+
+      return fs.createReadStream(filePath).pipe(res);
     }
 
-    upstream = await fetch(imageUrl, {
+    // kalau expired → hapus
+    if (fs.existsSync(filePath) && isExpired(filePath)) {
+      fs.unlinkSync(filePath);
+    }
+
+    // =========================
+    // MISS → FETCH ORIGIN
+    // =========================
+    res.setHeader("X-Cache", "MISS-VPS");
+    res.setHeader("Cache-Control", "public, max-age=300");
+
+    const upstream = await fetch(imageUrl, {
       headers: {
         Referer: "https://komikcast.fit/",
         Origin: "https://komikcast.fit",
@@ -50,40 +103,28 @@ app.use("/img", async (req, res) => {
       return res.status(502).send("Fetch failed");
     }
 
-    res.setHeader(
-      "Content-Type",
-      upstream.headers.get("content-type") || "image/jpeg"
-    );
-
-    res.setHeader("Cache-Control", "public, max-age=31536000");
-
-    // 🔥 convert WebStream → Node stream (SAFE FOR NODE 22)
     const nodeStream = Readable.fromWeb(upstream.body);
 
-    // 🔥 cleanup kalau client disconnect
-    const cleanup = () => {
-      try {
-        nodeStream.destroy();
-      } catch {}
-    };
+    // =========================
+    // STREAM + SAVE TO DISK
+    // =========================
+    const fileStream = fs.createWriteStream(filePath);
+    const passThrough = new PassThrough();
 
-    req.on("close", cleanup);
-    res.on("close", cleanup);
+    nodeStream.pipe(passThrough);
+    nodeStream.pipe(fileStream);
 
-    await streamPipeline(nodeStream, res);
+    await streamPipeline(passThrough, res);
 
   } catch (err) {
-    // ❌ ignore noise error dari disconnect client
-    if (err.code !== "ERR_STREAM_PREMATURE_CLOSE") {
-      console.error("ERROR:", err);
-    }
-
+    console.error("ERROR:", err);
     if (!res.headersSent) {
       res.status(500).send("Server error");
     }
   }
 });
 
+// =========================
 app.listen(3000, () => {
-  console.log("http://localhost:3000");
+  console.log("Mini CDN (5 min cache) running on http://localhost:3000");
 });
