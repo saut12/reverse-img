@@ -4,10 +4,8 @@ const { promisify } = require("util");
 const { Readable } = require("stream");
 
 const streamPipeline = promisify(pipeline);
-
 const app = express();
 
-// 🔥 whitelist domain
 const ALLOWED_HOSTS = [
   "sv1.imgkc1.my.id",
   "sv2.imgkc2.my.id",
@@ -15,6 +13,8 @@ const ALLOWED_HOSTS = [
 ];
 
 app.use("/img", async (req, res) => {
+  let upstream;
+
   try {
     const raw = req.originalUrl.replace("/img/", "");
 
@@ -29,17 +29,15 @@ app.use("/img", async (req, res) => {
 
     const urlObj = new URL(imageUrl);
 
-    // 🔥 VALIDASI HOST
-if (!ALLOWED_HOSTS.some(h => urlObj.hostname === h)) {
-  return res.status(403).send("Forbidden host");
-}
+    if (!ALLOWED_HOSTS.includes(urlObj.hostname)) {
+      return res.status(403).send("Forbidden host");
+    }
 
-if (!["http:", "https:"].includes(urlObj.protocol)) {
-  return res.status(400).send("Invalid protocol");
-}
-    // console.log("Proxy:", imageUrl);
+    if (!["http:", "https:"].includes(urlObj.protocol)) {
+      return res.status(400).send("Invalid protocol");
+    }
 
-    const response = await fetch(imageUrl, {
+    upstream = await fetch(imageUrl, {
       headers: {
         Referer: "https://komikcast.fit/",
         Origin: "https://komikcast.fit",
@@ -48,32 +46,43 @@ if (!["http:", "https:"].includes(urlObj.protocol)) {
       }
     });
 
-    if (!response.ok) {
-      return res.status(response.status).send("Fetch failed");
+    if (!upstream.ok || !upstream.body) {
+      return res.status(502).send("Fetch failed");
     }
 
     res.setHeader(
       "Content-Type",
-      response.headers.get("content-type") || "image/jpeg"
+      upstream.headers.get("content-type") || "image/jpeg"
     );
 
     res.setHeader("Cache-Control", "public, max-age=31536000");
 
-    if (!response.body) {
-      return res.status(500).send("No body");
-    }
+    // 🔥 handle client disconnect
+    req.on("close", () => {
+      try {
+        upstream?.body?.cancel?.();
+      } catch {}
+    });
 
     await streamPipeline(
-      Readable.fromWeb(response.body),
+      Readable.fromWeb(upstream.body),
       res
     );
 
+    // ❌ JANGAN ADA res.send / res.json di sini
   } catch (err) {
     console.error("ERROR:", err);
-    res.status(500).send("Server error");
+
+    if (!res.headersSent) {
+      res.status(500).send("Server error");
+    }
+
+    try {
+      upstream?.body?.cancel?.();
+    } catch {}
   }
 });
 
 app.listen(3000, () => {
   console.log("http://localhost:3000");
-});
+});  
