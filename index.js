@@ -3,38 +3,36 @@ const { Readable } = require("stream");
 
 const app = express();
 
-const ORIGINS = [
-  "https://sv1.imgkc1.my.id",
-  "https://sv2.imgkc2.my.id",
-  "https://sv3.imgkc3.my.id"
+const ALLOWED_HOSTS = [
+  "sv1.imgkc1.my.id",
+  "sv2.imgkc2.my.id",
+  "sv3.imgkc3.my.id"
 ];
 
-let index = 0;
-function getOrigin() {
-  const origin = ORIGINS[index];
-  index = (index + 1) % ORIGINS.length;
-  return origin;
-}
+// safety crash handler
+process.on("unhandledRejection", (err) => {
+  console.error("UNHANDLED REJECTION:", err);
+});
 
-process.on("unhandledRejection", console.error);
-process.on("uncaughtException", console.error);
+process.on("uncaughtException", (err) => {
+  console.error("UNCAUGHT EXCEPTION:", err);
+});
 
-// =========================
-// NO ROUTE PARAMS (IMPORTANT)
-// =========================
-app.use("/img", async (req, res) => {
+app.get("/img", async (req, res) => {
   try {
-    // ambil full path setelah /img
-    const path = req.originalUrl.replace("/img/", "");
+    const imageUrl = req.query.url;
+    if (!imageUrl) return res.status(400).send("Missing url");
 
-    if (!path || path === "/img") {
-      return res.status(400).send("Missing path");
+    const urlObj = new URL(imageUrl);
+    if (!ALLOWED_HOSTS.includes(urlObj.hostname)) {
+      return res.status(403).send("Forbidden host");
     }
 
-    const origin = getOrigin();
-    const imageUrl = `${origin}/${path}`;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
 
     const upstream = await fetch(imageUrl, {
+      signal: controller.signal,
       headers: {
         Referer: "https://komikcast.fit/",
         Origin: "https://komikcast.fit",
@@ -42,29 +40,30 @@ app.use("/img", async (req, res) => {
       }
     });
 
-    if (!upstream.ok || !upstream.body) {
+    clearTimeout(timeout);
+
+    if (!upstream || !upstream.ok || !upstream.body) {
       return res.status(502).send("Fetch failed");
     }
 
-    res.setHeader(
-      "Content-Type",
-      upstream.headers.get("content-type") || "image/jpeg"
-    );
-
+    res.setHeader("Content-Type", upstream.headers.get("content-type") || "image/jpeg");
     res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
 
-    const stream = Readable.fromWeb
+    const nodeStream = Readable.fromWeb
       ? Readable.fromWeb(upstream.body)
       : Readable.from(upstream.body);
 
-    stream.pipe(res);
+    nodeStream.pipe(res);
 
   } catch (err) {
-    console.error(err);
-    res.status(500).send("Server error");
+    console.error("ERROR:", err);
+
+    if (!res.headersSent) {
+      res.status(500).send("Server error");
+    }
   }
 });
 
 app.listen(3000, () => {
-  console.log("🚀 Stable Proxy (NO ROUTE PARAM) running on :3000");
+  console.log("🚀 Stable proxy running on :3000");
 });
