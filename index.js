@@ -1,7 +1,6 @@
 const express = require("express");
 const { pipeline } = require("stream");
 const { promisify } = require("util");
-const { Readable } = require("stream");
 
 const streamPipeline = promisify(pipeline);
 const app = express();
@@ -13,8 +12,6 @@ const ALLOWED_HOSTS = [
 ];
 
 app.use("/img", async (req, res) => {
-  let upstream;
-
   try {
     const raw = req.originalUrl.replace("/img/", "");
 
@@ -37,7 +34,7 @@ app.use("/img", async (req, res) => {
       return res.status(400).send("Invalid protocol");
     }
 
-    upstream = await fetch(imageUrl, {
+    const upstream = await fetch(imageUrl, {
       headers: {
         Referer: "https://komikcast.fit/",
         Origin: "https://komikcast.fit",
@@ -57,30 +54,19 @@ app.use("/img", async (req, res) => {
 
     res.setHeader("Cache-Control", "public, max-age=31536000");
 
-    // 🔥 handle client disconnect
-    req.on("close", () => {
-      try {
-        upstream?.body?.cancel?.();
-      } catch {}
-    });
+    // ❌ JANGAN pakai req.on("close") cancel WebStream
 
-await streamPipeline(upstream.body, res);
+    await streamPipeline(upstream.body, res);
 
-
-// ❌ JANGAN ADA res.send / res.json di sini
   } catch (err) {
     console.error("ERROR:", err);
 
     if (!res.headersSent) {
       res.status(500).send("Server error");
     }
-
-    try {
-      upstream?.body?.cancel?.();
-    } catch {}
   }
 });
 
 app.listen(3000, () => {
   console.log("http://localhost:3000");
-});  
+}); 
