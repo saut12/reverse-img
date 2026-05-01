@@ -1,5 +1,6 @@
 const express = require("express");
 const { pipeline } = require("stream");
+const { Readable } = require("stream");
 const { promisify } = require("util");
 
 const streamPipeline = promisify(pipeline);
@@ -12,6 +13,8 @@ const ALLOWED_HOSTS = [
 ];
 
 app.use("/img", async (req, res) => {
+  let upstream;
+
   try {
     const raw = req.originalUrl.replace("/img/", "");
 
@@ -34,7 +37,7 @@ app.use("/img", async (req, res) => {
       return res.status(400).send("Invalid protocol");
     }
 
-    const upstream = await fetch(imageUrl, {
+    upstream = await fetch(imageUrl, {
       headers: {
         Referer: "https://komikcast.fit/",
         Origin: "https://komikcast.fit",
@@ -54,12 +57,26 @@ app.use("/img", async (req, res) => {
 
     res.setHeader("Cache-Control", "public, max-age=31536000");
 
-    // ❌ JANGAN pakai req.on("close") cancel WebStream
+    // 🔥 convert WebStream → Node stream (SAFE FOR NODE 22)
+    const nodeStream = Readable.fromWeb(upstream.body);
 
-    await streamPipeline(upstream.body, res);
+    // 🔥 cleanup kalau client disconnect
+    const cleanup = () => {
+      try {
+        nodeStream.destroy();
+      } catch {}
+    };
+
+    req.on("close", cleanup);
+    res.on("close", cleanup);
+
+    await streamPipeline(nodeStream, res);
 
   } catch (err) {
-    console.error("ERROR:", err);
+    // ❌ ignore noise error dari disconnect client
+    if (err.code !== "ERR_STREAM_PREMATURE_CLOSE") {
+      console.error("ERROR:", err);
+    }
 
     if (!res.headersSent) {
       res.status(500).send("Server error");
@@ -69,4 +86,4 @@ app.use("/img", async (req, res) => {
 
 app.listen(3000, () => {
   console.log("http://localhost:3000");
-}); 
+});
