@@ -37,7 +37,7 @@ if (!ALLOWED_HOSTS.some(h => urlObj.hostname === h)) {
 if (!["http:", "https:"].includes(urlObj.protocol)) {
   return res.status(400).send("Invalid protocol");
 }
-    console.log("Proxy:", imageUrl);
+    // console.log("Proxy:", imageUrl);
 
     const response = await fetch(imageUrl, {
       headers: {
